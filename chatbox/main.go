@@ -3,9 +3,11 @@ package main
 import (
 	"fmt"
 	"net"
+	"strings"
+	"time"
 )
 
-// 创建用户结构体
+// Client 创建用户结构体
 type Client struct {
 	C    chan string
 	Name string
@@ -18,7 +20,7 @@ var onlineMap map[string]Client
 // 创建全局 channl
 var message = make(chan string)
 
-// 监听消息并发送给客户端
+// WriteMsgToClient 监听消息并发送给客户端
 func WriteMsgToClient(clnt Client, conn net.Conn) {
 	// 一有消息就写给当前用户
 	for msg := range clnt.C {
@@ -27,11 +29,14 @@ func WriteMsgToClient(clnt Client, conn net.Conn) {
 }
 
 func makeMsg(clnt Client, msg string) string {
-	buf := "[" + clnt.Addr +" "+ clnt.Name + "]:" + msg
+	buf := "[" + clnt.Addr + " " + clnt.Name + "]:" + msg
 	return buf
 }
 
+// HandleConnect 用户控制句柄
 func HandleConnect(conn net.Conn) {
+	isLogOut := make(chan bool)
+	isAlive := make(chan bool)
 	defer conn.Close()
 	// 获取 ip 和port
 	netAddr := conn.RemoteAddr().String()
@@ -50,11 +55,12 @@ func HandleConnect(conn net.Conn) {
 
 	// 创建一个go程， 广播用户消息
 	go func() {
-		buf := make([]byte,4096)
+		buf := make([]byte, 4096)
 		for {
 			n, err := conn.Read(buf)
 			if n == 0 {
 				fmt.Println("检测到客户端推出", clnt.Name)
+				isLogOut <- true
 				return
 			}
 			if err != nil {
@@ -63,15 +69,44 @@ func HandleConnect(conn net.Conn) {
 			}
 			// 将读到的信息广播
 			msg := string(buf[:n])
-			message <- makeMsg(clnt, msg)
+			msg = msg[:len(msg)-1]
+			if msg == "who" {
+				rdat := ""
+				for _, val := range onlineMap {
+					rdat += val.Addr + ":" + val.Name + "\n"
+				}
+				conn.Write([]byte(rdat))
+			} else if strings.HasPrefix(msg, "rename") {
+				clnt.Name = msg[7:]
+				onlineMap[netAddr] = clnt
+				conn.Write([]byte("renameOk: " + clnt.Name))
+			} else {
+				message <- makeMsg(clnt, msg)
+			}
+			isAlive <- true
 		}
 	}()
-	
 
+	// 监控退出
 	for {
-		;
+		select {
+		case <-isLogOut:
+			// 清理用户信息
+			delete(onlineMap, clnt.Addr)
+			message <- makeMsg(clnt, "log out")
+			return
+		case <-isAlive:
+			// 刷新for
+		case <-time.After(time.Second * 15):
+			delete(onlineMap, clnt.Addr)
+			message <- makeMsg(clnt, "time out and killed")
+			fmt.Println("kill ", clnt.Name)
+			return
+		}
 	}
 }
+
+// Mannger 发送数据的管家
 func Mannger() {
 	// 初始化 onlineMap
 	onlineMap = make(map[string]Client)
